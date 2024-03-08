@@ -35,6 +35,11 @@ class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
     config_class = LlavaConfig
 
     def __init__(self, config: LlamaConfig):
+        self.total_token = 0
+        self.total_time = 0
+        self.merge_time = 0
+        self.flag = 0
+        self.idx = 0
         super(LlavaLlamaModel, self).__init__(config)
 
 
@@ -47,7 +52,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
+        self.merge_image = []
+        self.merge_image_size = 0
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -69,7 +75,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         if inputs_embeds is None:
             (
                 input_ids,
@@ -87,7 +92,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
                 images,
                 image_sizes
             )
-
+        # print(inputs_embeds.shape)
         return super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -113,7 +118,9 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
-
+        if(self.model.flag == 0):
+            self.model.flag = 1
+            self.merge_image = []
         if images is not None:
             (
                 inputs,
@@ -133,7 +140,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
-
+        # print("inputs_embeds.shape",inputs_embeds.shape)
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,

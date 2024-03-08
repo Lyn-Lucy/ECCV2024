@@ -24,7 +24,227 @@ from .multimodal_projector.builder import build_vision_projector
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 from llava.mm_utils import get_anyres_image_grid_shape
+from tome.merge import *
+import json
 
+def draw_cross_attention(o_input_ids,o_input_embeds,image_embeds):
+    from transformers import AutoTokenizer
+    from torch.nn.functional import cosine_similarity
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    import numpy as np
+    model_path = "/home/lzh/llx/models/models--liuhaotian--llava-v1.5-13b"
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    input_ids = o_input_ids[2:-5]
+    input_embeds = o_input_embeds[2:-5]
+    similarity = cosine_similarity(input_embeds.unsqueeze(1), image_embeds.unsqueeze(0), dim=2)
+    text_image_avg_similarity = torch.mean(similarity, dim=0).cpu().numpy()
+    similarity_matrix = text_image_avg_similarity.reshape(24, 24)
+
+    image_to_add = Image.open('/home/lzh/llx/LLaVA/images/scienceqa/ant.png')
+    image_to_add = image_to_add.resize((336, 336))  # 调整图片大小
+
+    # 画每一个token对应的相似度图
+
+    # num_text_tokens = similarity.size(0)
+    # for i in range(num_text_tokens):
+    #     # 取出第 i 个 text token 与所有 image tokens 的相似度
+    #     text_image_similarity = similarity[i].cpu().numpy()  # 转换为 NumPy 数组
+    #     # 重塑为 24x24 矩阵
+    #     similarity_matrix = text_image_similarity.reshape(24, 24)
+        
+    #     # 创建一个新的子图
+    #     plt.figure(figsize=(4, 4))
+    #     # 绘制热力图
+    #     plt.imshow(similarity_matrix, cmap='viridis')
+    #     plt.colorbar()  # 显示颜色条
+    #     plt.title(f'Similarity Heatmap for Text {tokenizer.decode(input_ids[i])}')
+    #     plt.xlabel('Image Token X-coordinate')
+    #     plt.ylabel('Image Token Y-coordinate')
+    #     plt.savefig(f'/home/zhihang/LLaVA/images/dog_cat/{tokenizer.decode(input_ids[i])}.png', dpi=300)
+
+    # 整个文本和图片的相似度图
+    plt.figure(figsize=(12, 6))
+    # 绘制热力图
+    plt.subplot(1, 2, 1)
+    plt.imshow(similarity_matrix, cmap='viridis')
+    plt.colorbar()  # 显示颜色条
+    plt.title(f'Text: {tokenizer.decode(input_ids)}')
+    plt.xlabel('Image Token X-coordinate')
+    plt.ylabel('Image Token Y-coordinate')
+
+    #绘制图片
+    plt.subplot(1, 2, 2)
+    plt.imshow(image_to_add)
+    # plt.title('dog')
+    plt.axis('off')  # 不显示坐标轴
+
+    #保存
+    plt.savefig('/home/lzh/llx/LLaVA/images/scienceqa/ant-ant,.jpg', dpi=300)
+def draw_protect_token(tensor1,x=0):
+    import numpy as np
+    import matplotlib.pyplot as plt
+    tensor = tensor1.reshape((24,24)).cpu().numpy()
+    plt.imshow(tensor, cmap='gray')
+    plt.colorbar()
+    if x==0:
+        plt.savefig('/home/lzh/llx/protect_toke_before', dpi=300)
+    else:
+        plt.savefig('/home/lzh/llx/protect_toke_after', dpi=300)
+    # for i in range(5,10):
+    # a = torch.where(tensor1 > 2, torch.tensor(1), torch.tensor(0))
+    # tensor = a.reshape((24,24)).cpu().numpy()
+    # plt.imshow(tensor, cmap='gray')
+    # plt.savefig(f'/home/lzh/llx/protect_token1.png', dpi=300)
+
+def cross_attention(o_input_ids,o_input_embeds,image_embeds,idx):
+    from torch.nn.functional import cosine_similarity
+    from transformers import AutoTokenizer
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    import numpy as np
+    from .. import config
+    # sim_thresh = config.args.sim_thresh
+    # retain_num = config.args.retain_num
+    topnum = config.args.topnum
+    # mode = "sum"
+    o_input_ids = o_input_ids[37:-5]
+    o_input_embeds = o_input_embeds[37:-5]
+    # o_input_ids = o_input_ids[37:-16]
+    # o_input_embeds = o_input_embeds[37:-16]
+    model_path = "/home/lzh/llx/models/models--liuhaotian--llava-v1.5-13b"
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    # print_info = {
+    #     'problem_idx':idx,
+    #     'problem':tokenizer.decode(o_input_ids),
+    #     'token_chosed': []
+    # }
+    # print(idx)
+    # print(tokenizer.decode(o_input_ids))
+    # 去重操作，保证input_ids和input_embeds位置一样，比较方便查看选到哪些token
+    dic = {}
+    for key, value in zip(o_input_ids, o_input_embeds):
+        if key.item() not in dic and len(tokenizer.decode(key.item()))>1 and tokenizer.decode(key.item())!="Context":
+            dic[key.item()] = value
+    input_ids = torch.tensor(list(dic.keys()))
+    input_embeds = torch.stack(list(dic.values()))
+    # 用log函数映射句子长度和选择重要文本token的关系
+    # if retain_num==-1:
+    #     retain_num=round(np.poly1d([1.526, -1.00])(np.log(input_ids.shape[0])))
+    similarity = cosine_similarity(input_embeds.unsqueeze(1).to(image_embeds.device), image_embeds.unsqueeze(0), dim=2)
+    # 计算每个文本token的熵
+    def calculate_entropy(tensor,tempreature):
+        # First convert tensor values to probabilities using softmax function
+        tensor_prob = torch.nn.functional.softmax(tensor/tempreature, dim=-1)
+        # Compute entropy
+        entropy = -torch.sum(tensor_prob * torch.log(tensor_prob+1e-9), dim=-1)
+        return entropy
+    input_entropy = calculate_entropy(similarity,0.01)
+    min_val = torch.min(similarity)
+    similarity = similarity - min_val
+    similarity /= input_entropy.unsqueeze(1)
+    input_similarity_sum = similarity.sum(dim=0)
+
+    # draw_protect_token(input_similarity_sum)
+    # input_entropy[torch.where(input_similarity_sum < 0)[0]] = 100
+    # values, indices = torch.topk(-input_entropy, min(input_entropy.shape[0],retain_num))
+    # # values, indices = torch.topk(-input_entropy, retain_num)
+    # protect_text_similarity = similarity[indices,:] # 取熵最小的五个值
+    # protect_token_idx = torch.where(input_entropy < 5)[0]
+    # for i in indices:
+    #     print(tokenizer.decode(input_ids[i]),input_entropy[i].item(), end=' ')
+    #     print_info['token_chosed'].append({
+    #                 'token': tokenizer.decode(input_ids[i]),
+    #                 'entropy': input_entropy[i].item()
+    #             })
+    # with open('/home/lzh/llx/vqa_output.json', 'a', encoding='utf-8') as f:
+    #     json.dump(print_info, f, ensure_ascii=False, indent=4)
+    #     f.write('\n')
+    # if mode == "vote":
+    #     protect_image_token = (protect_text_similarity > sim_thresh).sum(dim=0).to(protect_text_similarity.device)
+    #     # draw_protect_token(protect_image_token,2)
+    #     protect_image_token_idx = torch.where(protect_image_token>2)[0]
+    # elif mode == "sum":
+    # mask0 = protect_text_similarity > sim_thresh
+    # mask_values = mask0 * protect_text_similarity
+    # protect_image_token = mask_values.sum(dim=0)
+    # print(torch.count_nonzero(protect_image_token))
+    values, protect_image_token_idx = torch.topk(input_similarity_sum, topnum)
+
+    mask = torch.ones(input_similarity_sum.size(0), dtype=bool)
+    mask[protect_image_token_idx] = False
+    return image_embeds[protect_image_token_idx],image_embeds[mask]
+    
+def avg_pooling(image_token_idx):
+    pass
+
+def token_merging(image_embeds,r,size):
+    merge,_ = bipartite_soft_matching(image_embeds,r,False,False)
+    image_embeds_merged,sized = merge_wavg(merge,image_embeds,size)
+    return image_embeds_merged,sized
+
+def fixnum_token(img_token,max_token,r):
+    token_len = img_token.shape[1]
+    size = None
+    # while(1):
+    #     if(token_len <= max_token):
+    #         break
+    #     if(token_len > 2*max_token):
+    #         img_token,size = token_merging(img_token,int(token_len/2),size)
+    #         token_len -= int(token_len/2)
+    #     else:
+    #         img_token,size = token_merging(img_token,token_len-max_token,size)
+    #         token_len -= token_len-max_token
+    #         break
+    while(1):
+        if(token_len <= max_token):
+            break
+        img_token,size = token_merging(img_token,min(r,token_len-max_token),size)
+        token_len -= min(r,token_len-max_token)
+    return img_token,token_len
+
+def dual_token_merging(cur_input_ids,cur_input_embeds,cur_image_features,ratio,max_pro,idx):
+    protect_img_token,normal_img_token = cross_attention(cur_input_ids,cur_input_embeds,cur_image_features,idx)
+    # print("protect_img_token.shape",protect_img_token.shape)
+    protect_img_token = protect_img_token.unsqueeze(0)
+    normal_img_token = normal_img_token.unsqueeze(0)
+    target_num = int((protect_img_token.shape[1]+normal_img_token.shape[1])*ratio)
+    # merge protect_img_token
+    protect_img_token,lenpro = fixnum_token(protect_img_token,max_pro,8)
+    # merge normal_img_token
+    max_nor = target_num-lenpro
+    normal_img_token,lennor = fixnum_token(normal_img_token,max_nor,8)
+    # print("after_len:",protect_img_token.shape[1]+normal_img_token.shape[1],"pro:",protect_img_token.shape[1])
+    return torch.cat((protect_img_token.squeeze(0),normal_img_token.squeeze(0)),dim=0)
+
+def normal_token_merging(img_token,ratio):
+    img_token = img_token.unsqueeze(0)
+    maxnum = int(img_token.shape[1]*ratio)
+    from .. import config
+    topnum = config.args.topnum
+    img_token,_ = fixnum_token(img_token,topnum,8)
+    img_token,_ = fixnum_token(img_token,maxnum,8)
+    return img_token.squeeze(0)
+
+
+def downsample_features(features, original_height, original_width, downsample_size):
+
+    # 确定变形后的形状(N, H, W, C)，准备提取左上角的值
+    features = features.reshape((original_height, original_width, features.shape[-1]))
+    
+    # 下采样后的新高度和宽度
+    new_height, new_width = original_height // downsample_size, original_width // downsample_size
+    
+    # 初始化下采样后的新特征
+    downsampled = torch.zeros((new_height, new_width, features.shape[-1]), dtype=features.dtype)
+    
+    # 选择左上角的值，步进为下采样的大小
+    for i in range(new_height):
+        for j in range(new_width):
+            downsampled[i, j, :] = features[i * downsample_size, j * downsample_size, :]
+            
+    # 改变形状以匹配目标输出大小 (N, H*W, C)
+    return downsampled.reshape((new_height * new_width, features.shape[-1]))
 
 class LlavaMetaModel:
 
@@ -234,6 +454,20 @@ class LlavaMetaForCausalLM(ABC):
             if num_images == 0:
                 cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                print("the problem idx:",self.model.idx)
+                from .. import config
+                ratio = config.args.ratio
+                max_pro = config.args.max_pro
+                use_merge = config.args.use_merge
+                if use_merge == True:
+                    if self.model.flag == 1:
+                        self.model.flag += 1
+                        # cur_image_features = dual_token_merging(cur_input_ids,cur_input_embeds_1,cur_image_features,ratio,max_pro,self.model.idx)
+                        cur_image_features = normal_token_merging(cur_image_features,ratio)
+                        print("cur_image_features.shape",cur_image_features.shape)
+                        self.merge_image = cur_image_features
+                    else:
+                        cur_image_features = self.merge_image
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
@@ -250,6 +484,7 @@ class LlavaMetaForCausalLM(ABC):
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            cur_input_id = torch.cat(cur_input_ids_noim)
             cur_new_input_embeds = []
             cur_new_labels = []
 
@@ -258,10 +493,37 @@ class LlavaMetaForCausalLM(ABC):
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
                     cur_image_features = image_features[cur_image_idx]
+                    from .. import config
+                    ratio = config.args.ratio
+                    max_pro = config.args.max_pro
+                    merge_mode = config.args.merge_mode
+                    if merge_mode == "downsample":
+                        cur_image_features = downsample_features(cur_image_features, 24, 24, 2)
+                    elif merge_mode == "tome":
+                        cur_image_features = normal_token_merging(cur_image_features,ratio)
+                    elif merge_mode == "mytome":
+                        import time
+                        if self.model.flag == 1 and cur_image_idx <= len(self.merge_image):
+                            start = time.time()
+                            cur_image_features = dual_token_merging(cur_input_id,cur_input_embeds,cur_image_features,ratio,max_pro,self.model.idx)
+                            # cur_image_features = normal_token_merging(cur_image_features,ratio)
+                            # import pdb
+                            # pdb.set_trace()
+                            end = time.time()
+                            # print("dual_token_merging:time",end-start)
+                            self.model.merge_time += end-start
+                            self.merge_image.append(cur_image_features)
+                        else:
+                            import pdb
+                            pdb.set_trace()
+                            cur_image_features = self.merge_image[cur_image_idx]
+                    print("the problem idx:",self.model.idx)
+                    print("merge_mode",merge_mode)
+                    print("cur_image_features.shape",cur_image_features.shape)
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
-
+            self.model.flag = 2
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
 
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
