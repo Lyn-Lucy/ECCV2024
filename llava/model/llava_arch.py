@@ -97,6 +97,13 @@ def draw_protect_token(tensor1,x=0):
     # plt.imshow(tensor, cmap='gray')
     # plt.savefig(f'/home/lzh/llx/protect_token1.png', dpi=300)
 
+def calculate_entropy(tensor,tempreature):
+    # First convert tensor values to probabilities using softmax function
+    tensor_prob = torch.nn.functional.softmax(tensor/tempreature, dim=-1)
+    # Compute entropy
+    entropy = -torch.sum(tensor_prob * torch.log(tensor_prob+1e-9), dim=-1)
+    return entropy
+
 def cross_attention(o_input_ids,o_input_embeds,image_embeds,idx):
     from torch.nn.functional import cosine_similarity
     from transformers import AutoTokenizer
@@ -104,10 +111,8 @@ def cross_attention(o_input_ids,o_input_embeds,image_embeds,idx):
     from PIL import Image
     import numpy as np
     from .. import config
-    # sim_thresh = config.args.sim_thresh
-    # retain_num = config.args.retain_num
+
     topnum = config.args.topnum
-    # mode = "sum"
     o_input_ids = o_input_ids[37:-5]
     o_input_embeds = o_input_embeds[37:-5]
     # o_input_ids = o_input_ids[37:-16]
@@ -128,24 +133,15 @@ def cross_attention(o_input_ids,o_input_embeds,image_embeds,idx):
             dic[key.item()] = value
     input_ids = torch.tensor(list(dic.keys()))
     input_embeds = torch.stack(list(dic.values()))
-    # 用log函数映射句子长度和选择重要文本token的关系
-    # if retain_num==-1:
-    #     retain_num=round(np.poly1d([1.526, -1.00])(np.log(input_ids.shape[0])))
+    # 计算每个文本token和图像token相似度
     similarity = cosine_similarity(input_embeds.unsqueeze(1).to(image_embeds.device), image_embeds.unsqueeze(0), dim=2)
     # 计算每个文本token的熵
-    def calculate_entropy(tensor,tempreature):
-        # First convert tensor values to probabilities using softmax function
-        tensor_prob = torch.nn.functional.softmax(tensor/tempreature, dim=-1)
-        # Compute entropy
-        entropy = -torch.sum(tensor_prob * torch.log(tensor_prob+1e-9), dim=-1)
-        return entropy
     input_entropy = calculate_entropy(similarity,0.01)
     min_val = torch.min(similarity)
     similarity = similarity - min_val
     similarity /= input_entropy.unsqueeze(1)
     input_similarity_sum = similarity.sum(dim=0)
 
-    # draw_protect_token(input_similarity_sum)
     # input_entropy[torch.where(input_similarity_sum < 0)[0]] = 100
     # values, indices = torch.topk(-input_entropy, min(input_entropy.shape[0],retain_num))
     # # values, indices = torch.topk(-input_entropy, retain_num)
@@ -186,16 +182,6 @@ def token_merging(image_embeds,r,size):
 def fixnum_token(img_token,max_token,r):
     token_len = img_token.shape[1]
     size = None
-    # while(1):
-    #     if(token_len <= max_token):
-    #         break
-    #     if(token_len > 2*max_token):
-    #         img_token,size = token_merging(img_token,int(token_len/2),size)
-    #         token_len -= int(token_len/2)
-    #     else:
-    #         img_token,size = token_merging(img_token,token_len-max_token,size)
-    #         token_len -= token_len-max_token
-    #         break
     while(1):
         if(token_len <= max_token):
             break
@@ -213,7 +199,7 @@ def dual_token_merging(cur_input_ids,cur_input_embeds,cur_image_features,ratio,m
     protect_img_token,lenpro = fixnum_token(protect_img_token,max_pro,8)
     # merge normal_img_token
     max_nor = target_num-lenpro
-    normal_img_token,lennor = fixnum_token(normal_img_token,max_nor,8)
+    normal_img_token,lennor = fixnum_token(normal_img_token,max_nor,32)
     # print("after_len:",protect_img_token.shape[1]+normal_img_token.shape[1],"pro:",protect_img_token.shape[1])
     return torch.cat((protect_img_token.squeeze(0),normal_img_token.squeeze(0)),dim=0)
 
@@ -223,26 +209,21 @@ def normal_token_merging(img_token,ratio):
     from .. import config
     topnum = config.args.topnum
     img_token,_ = fixnum_token(img_token,topnum,8)
-    img_token,_ = fixnum_token(img_token,maxnum,8)
+    img_token,_ = fixnum_token(img_token,maxnum,32)
     return img_token.squeeze(0)
 
 
 def downsample_features(features, original_height, original_width, downsample_size):
-
     # 确定变形后的形状(N, H, W, C)，准备提取左上角的值
     features = features.reshape((original_height, original_width, features.shape[-1]))
-    
     # 下采样后的新高度和宽度
     new_height, new_width = original_height // downsample_size, original_width // downsample_size
-    
     # 初始化下采样后的新特征
     downsampled = torch.zeros((new_height, new_width, features.shape[-1]), dtype=features.dtype)
-    
     # 选择左上角的值，步进为下采样的大小
     for i in range(new_height):
         for j in range(new_width):
             downsampled[i, j, :] = features[i * downsample_size, j * downsample_size, :]
-            
     # 改变形状以匹配目标输出大小 (N, H*W, C)
     return downsampled.reshape((new_height * new_width, features.shape[-1]))
 
