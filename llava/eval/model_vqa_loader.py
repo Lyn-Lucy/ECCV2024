@@ -14,12 +14,14 @@ from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
 import math
-
+from accelerate.utils import set_seed
+set_seed(1)
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
-    return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
+    # return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
+    return [lst[i::n] for i in range(0, n)]
 
 
 def get_chunk(lst, n, k):
@@ -101,7 +103,11 @@ def eval_model(args):
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
 
+        with open('/home/lzh/llx/attn_map/temp.txt', 'w') as f:
+            f.write("0")
+
         with torch.inference_mode():
+            model.model.idx = idx
             output_ids = model.generate(
                 input_ids,
                 images=image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True),
@@ -112,6 +118,12 @@ def eval_model(args):
                 num_beams=args.num_beams,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True)
+            model.model.flag=0
+
+        import sys
+        sys.path.append('/home/lzh/llx/attn_map')
+        from draw import draw_attn_map
+        draw_attn_map(idx,cur_prompt,image_tensor)
 
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
@@ -139,6 +151,16 @@ if __name__ == "__main__":
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=128)
-    args = parser.parse_args()
 
+    parser.add_argument("--merge_mode", type=str,default="nomerge")
+    parser.add_argument("--topnum", type=int, default=100)
+    parser.add_argument("--ratio", type=float, default=0.125)
+    parser.add_argument("--max_pro", type=int, default=50)
+    # parser.add_argument("--sim_thresh", type=float, default=0.02)
+    # parser.add_argument("--retain_num", type=int, default=5)
+    from .. import config
+    config.args = parser.parse_args()
+    args = parser.parse_args()
+    for arg in vars(args):
+        print(arg, getattr(args, arg))
     eval_model(args)

@@ -14,11 +14,14 @@ from llava.mm_utils import tokenizer_image_token, process_images, get_model_name
 from PIL import Image
 import math
 
+from accelerate.utils import set_seed
+set_seed(1)
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
-    return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
+    # return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
+    return [lst[i::n] for i in range(0, n)]
 
 
 def get_chunk(lst, n, k):
@@ -58,6 +61,7 @@ def eval_model(args):
         else:
             images = None
             image_sizes = None
+            continue
 
         if args.single_pred_prompt:
             qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
@@ -69,8 +73,12 @@ def eval_model(args):
         prompt = conv.get_prompt()
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+    
+        with open('/home/lzh/llx/attn_map/temp.txt', 'w') as f:
+            f.write("0")
 
         with torch.inference_mode():
+            model.model.idx = idx
             output_ids = model.generate(
                 input_ids,
                 images=images,
@@ -80,6 +88,11 @@ def eval_model(args):
                 max_new_tokens=1024,
                 use_cache=True,
             )
+
+        import sys
+        sys.path.append('/home/lzh/llx/attn_map')
+        from draw import draw_attn_map
+        draw_attn_map(idx,prompt)
 
         outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
 
@@ -91,6 +104,11 @@ def eval_model(args):
                                    "model_id": model_name,
                                    "metadata": {}}) + "\n")
         ans_file.flush()
+    # print(model.model.total_token)
+    # print(model.model.total_time)
+    # print(model.model.total_time/model.model.total_token)
+    # print(model.model.merge_time)
+    # print((model.model.total_time+model.model.merge_time)/model.model.total_token)
     ans_file.close()
 
 if __name__ == "__main__":
@@ -106,6 +124,14 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--answer-prompter", action="store_true")
     parser.add_argument("--single-pred-prompt", action="store_true")
-    args = parser.parse_args()
 
+    parser.add_argument("--merge_mode", type=str,default="nomerge")
+    parser.add_argument("--topnum", type=int, default=100)
+    parser.add_argument("--ratio", type=float, default=0.125)
+    parser.add_argument("--max_pro", type=int, default=50)
+    from .. import config
+    config.args = parser.parse_args()
+    args = parser.parse_args()
+    for arg in vars(args):
+        print(arg, getattr(args, arg))
     eval_model(args)

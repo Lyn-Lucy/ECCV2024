@@ -104,6 +104,36 @@ def calculate_entropy(tensor,tempreature):
     entropy = -torch.sum(tensor_prob * torch.log(tensor_prob+1e-9), dim=-1)
     return entropy
 
+def save_similarity(o_input_ids,o_input_embeds,image_embeds):
+    from torch.nn.functional import cosine_similarity
+    from transformers import AutoTokenizer
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    import numpy as np
+    from .. import config
+    topnum = config.args.topnum
+    o_input_ids = o_input_ids[37:-16]
+    o_input_embeds = o_input_embeds[37:-16]
+    model_path = "/home/lzh/llx/models/models--liuhaotian--llava-v1.5-13b"
+    tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+    dic = {}
+    for key, value in zip(o_input_ids, o_input_embeds):
+        if key.item() not in dic and len(tokenizer.decode(key.item()))>1 and tokenizer.decode(key.item())!="Context":
+            dic[key.item()] = value
+    input_ids = torch.tensor(list(dic.keys()))
+    input_embeds = torch.stack(list(dic.values()))
+    # 计算每个文本token和图像token相似度
+    similarity = cosine_similarity(input_embeds.unsqueeze(1).to(image_embeds.device), image_embeds.unsqueeze(0), dim=2)
+    # 计算每个文本token的熵
+    input_entropy = calculate_entropy(similarity,0.01)
+    min_val = torch.min(similarity)
+    similarity = similarity - min_val
+    similarity /= input_entropy.unsqueeze(1)
+    input_similarity_sum = similarity.sum(dim=0)
+    torch.save(input_similarity_sum,"/home/lzh/llx/attn_map/similarity.pt")
+
+
+
 def cross_attention(o_input_ids,o_input_embeds,image_embeds,idx):
     from torch.nn.functional import cosine_similarity
     from transformers import AutoTokenizer
@@ -208,8 +238,8 @@ def normal_token_merging(img_token,ratio):
     maxnum = int(img_token.shape[1]*ratio)
     from .. import config
     topnum = config.args.topnum
-    img_token,_ = fixnum_token(img_token,topnum,8)
-    img_token,_ = fixnum_token(img_token,maxnum,32)
+    img_token,_ = fixnum_token(img_token,topnum,32)
+    img_token,_ = fixnum_token(img_token,maxnum,8)
     return img_token.squeeze(0)
 
 
@@ -485,19 +515,11 @@ class LlavaMetaForCausalLM(ABC):
                     elif merge_mode == "mytome":
                         import time
                         if self.model.flag == 1 and cur_image_idx <= len(self.merge_image):
-                            start = time.time()
                             cur_image_features = dual_token_merging(cur_input_id,cur_input_embeds,cur_image_features,ratio,max_pro,self.model.idx)
-                            # cur_image_features = normal_token_merging(cur_image_features,ratio)
-                            # import pdb
-                            # pdb.set_trace()
-                            end = time.time()
-                            # print("dual_token_merging:time",end-start)
-                            self.model.merge_time += end-start
                             self.merge_image.append(cur_image_features)
                         else:
-                            import pdb
-                            pdb.set_trace()
                             cur_image_features = self.merge_image[cur_image_idx]
+                    save_similarity(cur_input_id,cur_input_embeds,cur_image_features)
                     print("the problem idx:",self.model.idx)
                     print("merge_mode",merge_mode)
                     print("cur_image_features.shape",cur_image_features.shape)
@@ -506,7 +528,6 @@ class LlavaMetaForCausalLM(ABC):
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
             self.model.flag = 2
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
-
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
