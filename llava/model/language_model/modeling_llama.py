@@ -411,7 +411,7 @@ class LlamaAttention(nn.Module):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
+        # attn_map = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
@@ -423,10 +423,14 @@ class LlamaAttention(nn.Module):
                 raise ValueError(
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
+            # if self.layer_idx > 20:
+            #     attention_mask[0,0,35:,:611] = -65504
+            #     attention_mask[0,0,3:,:7] = -65504
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        # attn_map = attn_weights
         attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
@@ -449,8 +453,8 @@ class LlamaAttention(nn.Module):
 
         if not output_attentions:
             attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
+        attn_map = None
+        return attn_output, attn_weights, past_key_value, attn_map
 
 
 class LlamaFlashAttention2(LlamaAttention):
@@ -556,7 +560,7 @@ class LlamaFlashAttention2(LlamaAttention):
         if not output_attentions:
             attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights, past_key_value, None
 
     def _flash_attention_forward(
         self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
@@ -756,7 +760,7 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.self_attn = LLAMA_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
-
+        self.layer_idx = layer_idx
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -795,7 +799,7 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states, self_attn_weights, present_key_value, attn_map = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -805,7 +809,57 @@ class LlamaDecoderLayer(nn.Module):
             **kwargs,
         )
         hidden_states = residual + hidden_states
+        
+        # if self.layer_idx >= 20:
+        #     hidden_states[0,35:611] = 0
+        
+        # with open('/home/lzh/llx/attn_map/temp.txt', 'r') as f:
+        #     flag = int(f.read())
 
+        # if flag == 0 and self.layer_idx in [6,12]:
+        #     flag = 1
+        #     if self.layer_idx == 12:
+        #         with open('/home/lzh/llx/attn_map/temp.txt', 'w') as f:
+        #             f.write(str(flag))
+        #     print("self.layer_idx:",self.layer_idx)
+        #     attn_map_mean = torch.mean(attn_map[0],dim=0)
+        #     # text_attn_map = attn_map_mean[613:-16,37:613]
+        #     text_attn_map = attn_map_mean[613:-5,37:613]
+        #     min_vals = text_attn_map.min(dim=1, keepdim=True).values
+        #     max_vals = text_attn_map.max(dim=1, keepdim=True).values
+        #     # 注意防止分母为0的情况
+        #     eps = 1e-10
+        #     normalized_text_attn_map = (text_attn_map - min_vals) / (max_vals - min_vals + eps)
+            # all text attn_map
+            # import torch.nn.functional as F
+            # softmax_text_attn_map = F.softmax(text_attn_map, dim=1)
+            # text_attn_map_mean = torch.mean(softmax_text_attn_map, dim=0)
+            # min_value = text_attn_map_mean.min()
+            # max_value = text_attn_map_mean.max()
+            # normalized_text_attn_map = (text_attn_map_mean - min_value) / (max_value - min_value)
+            # print(normalized_text_attn_map.shape)
+
+            #single text token attn_map
+            # torch.save(normalized_text_attn_map,f"/home/lzh/llx/attn_map/attn_map_layer{self.layer_idx}.pt")
+
+
+        #     values, protect_image_token_idx = torch.topk(attn_map_sum[-576:], 200)
+        #     mask = torch.ones(576, dtype=bool)
+        #     mask[protect_image_token_idx] = False
+        #     image_featrue = hidden_states[:,-576:]
+        #     protect_img_token,normal_img_token = image_featrue[:,protect_image_token_idx],image_featrue[:,mask]
+        #     new_image_featrue = dual_token_merging(protect_img_token,normal_img_token,0.25,100)
+        #     hidden_states = torch.cat((hidden_states[:,:-576],new_image_featrue),dim=1)
+
+            # from tome.merge import draw_protect_token
+            # a = torch.zeros(576)
+            # a[protect_image_token_idx]=1
+            # draw_protect_token(a,0)
+            # 挑选重要token_idx
+            # trimmed_tensor = outputs[0][:, 200:]
+            # new_outputs = (trimmed_tensor,) + outputs[1:]
+            # return new_outputs
+        
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -819,6 +873,7 @@ class LlamaDecoderLayer(nn.Module):
 
         if use_cache:
             outputs += (present_key_value,)
+
 
         return outputs
 
@@ -1067,14 +1122,13 @@ class LlamaModel(LlamaPreTrainedModel):
                     use_cache,
                 )
             else:
-                drop_layer_idx = int (len(self.layers) * 0.5)
-                if decoder_layer.self_attn.layer_idx == drop_layer_idx and seq_length == 1:
-                    position_ids[0][0] = past_key_values.key_cache[drop_layer_idx].shape[2] # 619 -> 
-                
-                if decoder_layer.self_attn.layer_idx == drop_layer_idx and seq_length > 1:
-                    hidden_states = torch.cat([hidden_states[:, :35], hidden_states[:, 611:]], dim=1)
-                    position_ids =position_ids[:, :hidden_states.shape[1]]
+                # drop_layer_idx = int(len(self.layers) * 0.25)
+                # if decoder_layer.self_attn.layer.idx == drop_layer_idx and seq_length == 1:
+                #     position_ids[0][0]= past_key_values.key_cache[drop_layer_idx].shape[2]
 
+                # if decoder_layer.self_attn.layer.idx == drop_layer_idx and seq_length > 1:
+                #     hidden_states = torch.cat([hidden_states[:, :35], hidden_states[:, 611:]], dim=1)
+                #     position_ids = position_ids[:,:hidden_states.shape[1]]
 
                 layer_outputs = decoder_layer(
                     hidden_states,
